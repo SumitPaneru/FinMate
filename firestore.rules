@@ -1,0 +1,162 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: users
+    // Document ID: {userId} (Auth UID)
+    // Fields:
+    //   - uid: string (required)
+    //   - email: string (required, email format)
+    //   - displayName: string (optional)
+    //   - photoURL: string (optional, url format)
+    //   - createdAt: timestamp (required)
+    //
+    // Collection: users/{userId}/transactions
+    // Document ID: auto-generated
+    // Fields:
+    //   - amount: number (required, positive)
+    //   - description: string (required, max 200 chars)
+    //   - type: string (required, 'income' or 'expense')
+    //   - category: string (required, enum)
+    //   - date: string (required, ISO 8601 date)
+    //   - userId: string (required, matches userId)
+    //   - createdAt: timestamp (required)
+    //
+    // Collection: users/{userId}/invoices
+    // Document ID: auto-generated
+    // Fields:
+    //   - invoiceNumber: string (required)
+    //   - clientName: string (required, max 100 chars)
+    //   - clientEmail: string (required, email format)
+    //   - issuedDate: string (required, ISO 8601)
+    //   - dueDate: string (required, ISO 8601)
+    //   - status: string (required, enum)
+    //   - total: number (required)
+    //   - items: list (required, max 50 items)
+    //   - userId: string (required, matches userId)
+    //   - createdAt: timestamp (required)
+    //
+    // Collection: users/{userId}/debts
+    // Document ID: auto-generated
+    // Fields:
+    //   - name: string (required, max 100 chars)
+    //   - totalAmount: number (required, positive)
+    //   - remainingAmount: number (required, positive)
+    //   - interestRate: number (required, >= 0)
+    //   - dueDate: string (required, ISO 8601)
+    //   - type: string (required, enum)
+    //   - userId: string (required, matches userId)
+    //   - createdAt: timestamp (required)
+    //
+    // ===============================================================
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() &&
+        (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('role', 'user') == 'admin' ||
+          (request.auth.token.email == "shivammedicarepvtltd@gmail.com" && request.auth.token.email_verified == true));
+    }
+
+    function isValidEmail(email) {
+      return email is string && email.matches("^[a-zA-Z0-9._%+-]+@ [a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$".replace(" ", ""));
+    }
+
+    function isValidDate(dateStr) {
+      return dateStr is string && dateStr.matches("^\\d{4}-\\d{2}-\\d{2}.*$");
+    }
+
+    function hasOnlyAllowedFields(fields) {
+      return request.resource.data.keys().hasOnly(fields);
+    }
+
+    // ===============================================================
+    // Domain Validators
+    // ===============================================================
+
+    function isValidUser(data) {
+      return data.get('uid', '') == request.auth.uid &&
+             isValidEmail(data.get('email', '')) &&
+             (data.get('displayName', null) == null || (data.displayName is string && data.displayName.size() < 100)) &&
+             (data.get('photoURL', null) == null || (data.photoURL is string && data.photoURL.size() < 1000)) &&
+             (data.get('currency', null) == null || (data.currency is string && data.currency.size() == 3)) &&
+             (data.get('createdAt', null) == null || data.createdAt is timestamp);
+    }
+
+    function isValidTransaction(data) {
+      return (data.get('userId', '') == request.auth.uid) &&
+             (data.get('amount', 0) is number) &&
+             (data.get('description', '') is string) &&
+             (data.get('type', '') in ['income', 'expense']) &&
+             (data.get('category', '') is string) &&
+             (data.get('currency', 'USD') in ['USD', 'NPR']);
+    }
+
+    function isValidInvoice(data) {
+      return (data.get('userId', '') == request.auth.uid) &&
+             (data.get('invoiceNumber', '') is string) &&
+             (data.get('clientName', '') is string) &&
+             (data.get('status', '') in ['draft', 'sent', 'paid', 'overdue']) &&
+             (data.get('total', 0) is number) &&
+             (data.get('currency', 'USD') in ['USD', 'NPR']);
+    }
+
+    function isValidDebt(data) {
+      return (data.get('userId', '') == request.auth.uid) &&
+             (data.get('name', '') is string) &&
+             (data.get('totalAmount', 0) is number) &&
+             (data.get('remainingAmount', 0) is number) &&
+             (data.get('type', '') in ['loan', 'credit_card', 'mortgage', 'other']) &&
+             (data.get('currency', 'USD') in ['USD', 'NPR']);
+    }
+
+    // ===============================================================
+    // Rules
+    // ===============================================================
+
+    match /users/{userId} {
+      allow read: if isOwner(userId) || isAdmin();
+      allow create: if isOwner(userId) && isValidUser(request.resource.data) && (!('role' in request.resource.data) || isAdmin());
+      allow update: if isOwner(userId) && isValidUser(request.resource.data) && (request.resource.data.role == resource.data.role || isAdmin());
+
+      match /transactions/{id} {
+        allow read: if isOwner(userId);
+        allow create: if isOwner(userId) && isValidTransaction(request.resource.data);
+        allow update: if isOwner(userId) && isValidTransaction(request.resource.data);
+        allow delete: if isOwner(userId);
+      }
+
+      match /invoices/{id} {
+        allow read: if isOwner(userId);
+        allow create: if isOwner(userId) && isValidInvoice(request.resource.data);
+        allow update: if isOwner(userId) && isValidInvoice(request.resource.data);
+        allow delete: if isOwner(userId);
+      }
+
+      match /debts/{id} {
+        allow read: if isOwner(userId);
+        allow create: if isOwner(userId) && isValidDebt(request.resource.data);
+        allow update: if isOwner(userId) && isValidDebt(request.resource.data);
+        allow delete: if isOwner(userId);
+      }
+    }
+    
+    // Default deny
+    match /{path=**} {
+      allow read, write: if false;
+    }
+  }
+}
